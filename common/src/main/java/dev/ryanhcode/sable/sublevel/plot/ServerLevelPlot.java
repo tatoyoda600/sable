@@ -7,6 +7,7 @@ import dev.ryanhcode.sable.api.entity.EntitySubLevelUtil;
 import dev.ryanhcode.sable.api.sublevel.KinematicContraption;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
 import dev.ryanhcode.sable.companion.math.BoundingBox3i;
 import dev.ryanhcode.sable.index.SableTags;
 import dev.ryanhcode.sable.mixinterface.plot.serialization.LevelChunkTicksExtension;
@@ -16,6 +17,7 @@ import dev.ryanhcode.sable.sublevel.SubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import it.unimi.dsi.fastutil.objects.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.SectionPos;
@@ -36,17 +38,20 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.*;
 import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraft.world.level.entity.EntitySection;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.ticks.LevelChunkTicks;
 
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -172,6 +177,103 @@ public class ServerLevelPlot extends LevelPlot {
         serverLevel.entityManager.updateChunkStatus(pos, FullChunkStatus.INACCESSIBLE);
     }
 
+    @Override
+    public void expandIfNecessary(final BlockPos blockPos) {
+        if (!this.expandPlotIfNecessary) {
+            return;
+        }
+
+        final ServerLevel serverLevel = this.getSubLevel().getLevel();
+        final int minHeight = serverLevel.getMinBuildHeight() + 1;
+        final int maxHeight = serverLevel.getMaxBuildHeight() - 1;
+        final int sublevelFreeAbove = this.localBounds == null ? 0 : (maxHeight - this.localBounds.maxY());
+        final int sublevelFreeBelow = this.localBounds == null ? 0 : (this.localBounds.minY() - minHeight);
+        Boolean shiftedContents = false;
+
+        for (final Direction direction : Direction.values()) {
+            // One block of margin to prevent black face lighting at the edges of chunks
+            final BlockPos offsetPos = blockPos.relative(direction, 2);
+
+            if (direction.getAxis() != Direction.Axis.Y) {
+                final ChunkPos globalChunk = new ChunkPos(offsetPos);
+
+                if (this.getChunk(this.toLocal(globalChunk)) == null) {
+                    // Add the chunk if it's missing
+                    this.newEmptyChunk(globalChunk);
+                }
+            } else if (offsetPos.getY() > maxHeight && sublevelFreeBelow > 1) {
+                final int shiftBlockCount = sublevelFreeBelow - ((sublevelFreeBelow - (offsetPos.getY() - maxHeight)) >> 1);
+                this.shiftContentsUp(-Math.max(shiftBlockCount, 0));
+            } else if (offsetPos.getY() < minHeight && sublevelFreeAbove > 1) {
+                final int newFreeAbove = sublevelFreeAbove - ((sublevelFreeAbove - (minHeight - offsetPos.getY())) >> 1);
+                this.shiftContentsUp(Math.max(newFreeAbove, 0));
+            }
+        }
+    }
+
+    /**
+     * Moves the contents of the plot up by a number of blocks.
+     *
+     * @param blockCount the amount of blocks up
+     */
+    public void shiftContentsUp(final Integer blockCount) {
+        if (blockCount == null || blockCount == 0 || this.localBounds == null) return;
+        this.expandPlotIfNecessary = false;
+        
+        final Boolean isUp = blockCount > 0;
+        final ServerLevel serverLevel = this.getSubLevel().getLevel();
+        final ServerSubLevel subLevel = this.getSubLevel();
+        final ServerSubLevelContainer serverContainer = (ServerSubLevelContainer)this.container;
+
+        final Comparator<BlockPos> sortByY;
+        if (isUp) {
+            sortByY = Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed();
+        } else {
+            sortByY = Comparator.<BlockPos>comparingInt(BlockPos::getY);
+        }
+        
+        BoundingBox boundingBox = BoundingBox.fromCorners(
+            new BlockPos(this.localBounds.minX, serverLevel.getMinBuildHeight() - 1, this.localBounds.minZ),
+            new BlockPos(this.localBounds.maxX, serverLevel.getMaxBuildHeight() + 1, this.localBounds.maxZ)
+        );
+        final List<BlockPos> blocks = BlockPos.betweenClosedStream(boundingBox)
+            .filter(pos -> !serverLevel.getBlockState(pos).isAir())
+            .map(BlockPos::immutable)
+            .sorted(sortByY)
+            .toList();
+        if (blocks.size() <= 0) return;
+
+        final BoundingBox3i bounds = new BoundingBox3i(boundingBox);
+        bounds.set(
+            bounds.minX - 1,
+            bounds.minY - 1,
+            bounds.minZ - 1,
+            bounds.maxX + 1,
+            bounds.maxY + 1,
+            bounds.maxZ + 1
+        );
+        final BlockPos tempAnchor = blocks.get(0);
+        final SubLevelAssemblyHelper.AssemblyTransform transform = new SubLevelAssemblyHelper.AssemblyTransform(
+            tempAnchor,
+            tempAnchor.offset(0, blockCount, 0),
+            0,
+            Rotation.NONE,
+            serverLevel
+        );
+
+        SubLevelAssemblyHelper.moveOtherStuff(serverLevel, transform, blocks, bounds);
+        SubLevelAssemblyHelper.moveBlocks(serverLevel, transform, blocks);
+
+        subLevel.logicalPose().position().add(0, -blockCount, 0);
+        serverContainer.physicsSystem().getPipeline().teleport(subLevel, subLevel.logicalPose().position(), subLevel.logicalPose().orientation());
+        subLevel.updateLastPose();
+        SubLevelAssemblyHelper.moveTrackingPoints(serverLevel, bounds, subLevel, transform);
+
+        this.localBounds = null;
+        this.updateBoundingBox();
+        this.expandPlotIfNecessary = true;
+    }
+
     public void setBiome(final ResourceKey<Biome> biome) {
         this.biome = biome;
     }
@@ -256,7 +358,6 @@ public class ServerLevelPlot extends LevelPlot {
             SubLevelPlayerChunkSender.sendChunkPoiData(level, chunk);
         }
     }
-
 
     /**
      * Deletes all entities in the plot
