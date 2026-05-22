@@ -333,6 +333,7 @@ public class SubLevelAssemblyHelper {
         }
 
         SableAssemblyPlatform.INSTANCE.setIgnoreOnPlace(resultingLevel, true);
+        HashSet<BlockPos> overlapDestinationsSet = new HashSet<BlockPos>();
         for (final BlockPos block : blocks) {
             final BlockState state = accelerator.getBlockState(block);
             final BlockPos newPos = transform.apply(block);
@@ -367,6 +368,12 @@ public class SubLevelAssemblyHelper {
 
                 chunk.setBlockState(newPos, subLevelState, true);
                 states.add(subLevelState);
+                if (
+                    chunk.getPos().x >= chunkBoundsMin.x && chunk.getPos().x <= chunkBoundsMax.x
+                    && chunk.getPos().z >= chunkBoundsMin.y && chunk.getPos().z <= chunkBoundsMax.y
+                ) {
+                    overlapDestinationsSet.add(newPos);
+                }
 
                 final BlockEntity newBlockEntity = resultingLevel.getBlockEntity(newPos);
 
@@ -401,6 +408,7 @@ public class SubLevelAssemblyHelper {
         SableAssemblyPlatform.INSTANCE.setIgnoreOnPlace(resultingLevel, true);
         // destroy all the old blocks
         for (final BlockPos block : blocks) {
+            if (overlapDestinationsSet.contains(block)) continue;
             final BlockState subLevelState = Blocks.AIR.defaultBlockState();
 
             try {
@@ -415,7 +423,7 @@ public class SubLevelAssemblyHelper {
         SableAssemblyPlatform.INSTANCE.setIgnoreOnPlace(resultingLevel, false);
 
         for (final BlockPos block : blocks) {
-            final BlockState subLevelState = Blocks.AIR.defaultBlockState();
+            final BlockState subLevelState = overlapDestinationsSet.contains(block) ? accelerator.getBlockState(block) : Blocks.AIR.defaultBlockState();
             resultingLevel.sendBlockUpdated(block, Blocks.STONE.defaultBlockState(), subLevelState, 3);
         }
     }
